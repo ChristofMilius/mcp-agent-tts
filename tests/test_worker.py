@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import socket
 import threading
+import wave
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -325,6 +327,68 @@ class TestSpeakDispatch:
 
         assert response["ok"] is False
         assert response["reason"] == "empty_text"
+
+
+class TestCatalog:
+    """The panel's on-demand inventory: no torch, no model load, no guessing."""
+
+    @staticmethod
+    def _speaker(tmp_path, **overrides):
+        values = {
+            "backend": "chatterbox",
+            "voice": "",
+            "voices_dir": tmp_path,
+            "lfm3_voice": "male",
+            "lfm3_language": "en",
+            **overrides,
+        }
+        return SimpleNamespace(cfg=SimpleNamespace(**values))
+
+    def test_chatterbox_catalog_lists_models_clips_and_languages(self, tmp_path):
+        with wave.open(str(tmp_path / "narrator.wav"), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(24000)
+            wav.writeframes(b"\x00\x00" * 240)
+
+        response, finished = _dispatch(
+            self._speaker(tmp_path), {"op": "catalog", "backend": "chatterbox"}
+        )
+
+        assert finished is False
+        assert response["ok"] is True
+        assert response["backend"] == "chatterbox"
+        assert "chatterbox" in [item["key"] for item in response["backends"]]
+        assert "nano" in [item["key"] for item in response["models"]]
+        assert response["voices"][0]["name"] == "narrator"
+        assert {"code": "de", "name": "German"} in response["languages"]
+        assert response["defaults"]["model"] == "nano"
+        assert response["defaults"]["language"] == "en"
+
+    def test_lfm3_catalog_uses_fixed_voices_and_its_own_language(self, tmp_path):
+        speaker = self._speaker(tmp_path, lfm3_voice="female", lfm3_language="fr")
+
+        response, _finished = _dispatch(speaker, {"op": "catalog", "backend": "lfm3"})
+
+        assert response["ok"] is True
+        assert [item["name"] for item in response["voices"]] == ["female", "male"]
+        assert all(item["fixed"] for item in response["voices"])
+        assert response["defaults"] == {
+            "backend": "lfm3",
+            "model": "lfm3",
+            "voice": "female",
+            "language": "fr",
+        }
+        assert "language" in response["honored_knobs"]
+
+    def test_an_unknown_backend_is_a_usable_error(self, tmp_path):
+        response, _finished = _dispatch(
+            self._speaker(tmp_path), {"op": "catalog", "backend": "nope"}
+        )
+
+        assert response["ok"] is False
+        assert response["reason"] == "unknown_backend"
+        assert "chatterbox" in response["supported"]
 
 
 class TestFraming:

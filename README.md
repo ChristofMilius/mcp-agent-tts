@@ -52,6 +52,26 @@ Start the resident synthesis worker separately:
 uv run python -m mcp_agent_tts worker
 ```
 
+## Control panel
+
+```powershell
+uv run mcp-agent-tts panel
+```
+
+The panel serves `http://127.0.0.1:8766/` and opens it in the browser. It runs
+until Ctrl+C; `uv run mcp-agent-tts panel-stop` shuts it down from another shell.
+
+The Voice section fetches an on-demand catalog from the worker (`op: catalog`).
+It lists the available backends, each backend's models, its voices (Chatterbox
+reference clips or LFM3's built-in `female` / `male`) and its languages. Changing
+the backend refetches that backend's choices; the model select and Advanced
+section update with it.
+
+Advanced knobs are sent only when set, so an empty field keeps the model's own
+tuned default. The panel hides knobs the selected model does not honor — LFM3
+uses only voice and language, while Chatterbox models differ in which style
+knobs they accept.
+
 ## Tool surface
 
 | Tool | Purpose |

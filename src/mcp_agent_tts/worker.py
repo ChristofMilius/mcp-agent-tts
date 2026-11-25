@@ -35,6 +35,7 @@ so two concurrent generate() calls on it are not safe.
 
   request   {"op": "speak", "text": "...", ...backend/model/voice/language knobs}
             {"op": "status"}
+            {"op": "catalog", "backend": "..."}  models/voices for the control panel
             {"op": "history"}   list the messages whose audio is still on disk
             {"op": "replay", "message_id": "..."}
                                 play an already-rendered message again, no GPU
@@ -88,6 +89,23 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from mcp_agent_tts.backends.chatterbox.registry import (
+    SUPPORTED_LANGUAGES as CHATTERBOX_LANGUAGES,
+)
+from mcp_agent_tts.backends.chatterbox.voices import list_voices as scan_voices
+from mcp_agent_tts.backends.lfm3.registry import (
+    SPEECH_LANGUAGES as LFM3_LANGUAGES,
+)
+from mcp_agent_tts.backends.lfm3.registry import (
+    VOICES as LFM3_VOICES,
+)
+from mcp_agent_tts.backends.registry import (
+    BACKEND_LFM3,
+    BACKEND_SPECS,
+    describe_backends,
+    describe_models,
+    normalize_backend,
+)
 from mcp_agent_tts.errors import ToolFault
 from mcp_agent_tts.output import scan_output
 
@@ -384,6 +402,66 @@ def serve(
     return 0
 
 
+def _language_options(table: dict[str, str]) -> list[dict[str, str]]:
+    """Turn a code -> name language table into panel options."""
+    return [{"code": code, "name": name} for code, name in sorted(table.items())]
+
+
+def _catalog(speaker, backend: str | None) -> dict[str, Any]:
+    """
+    Inventory for the control panel: backends, models, voices and languages.
+
+    On demand rather than in the status poll: reading Chatterbox clips touches
+    the filesystem, and a two-second poll has no reason to do that. Nothing here
+    imports torch or loads a model, so the catalog works before a worker start.
+    """
+    selected = normalize_backend(backend) or speaker.cfg.backend
+    if selected not in BACKEND_SPECS:
+        return {
+            "ok": False,
+            "reason": "unknown_backend",
+            "message": f"Unknown backend {backend!r}.",
+            "supported": sorted(BACKEND_SPECS),
+        }
+
+    spec = BACKEND_SPECS[selected]
+    if selected == BACKEND_LFM3:
+        voices = [
+            {
+                "name": name,
+                "fixed": True,
+                "requires_reference_clip": False,
+            }
+            for name in LFM3_VOICES
+        ]
+        languages = _language_options(LFM3_LANGUAGES)
+        default_voice = getattr(speaker.cfg, "lfm3_voice", "male")
+        default_language = getattr(speaker.cfg, "lfm3_language", "en")
+    else:
+        voices = scan_voices(speaker.cfg.voices_dir)
+        languages = _language_options(CHATTERBOX_LANGUAGES)
+        default_voice = getattr(speaker.cfg, "voice", "")
+        default_language = "en"
+
+    models = describe_models(selected)
+    return {
+        "ok": True,
+        "backend": selected,
+        "backends": describe_backends(),
+        "models": models,
+        "voices": voices,
+        "languages": languages,
+        "defaults": {
+            "backend": selected,
+            "model": spec.default_model,
+            "voice": default_voice,
+            "language": default_language,
+        },
+        "honored_knobs": sorted({knob for model in models for knob in model["tunable"]}),
+        "note": spec.note,
+    }
+
+
 def _dispatch(speaker, request: dict) -> tuple[dict, bool]:
     """
     Answer one request. Returns (response, should_exit).
@@ -456,6 +534,9 @@ def _dispatch(speaker, request: dict) -> tuple[dict, bool]:
     if op == "status":
         state = speaker.status()
         return {"ok": True, "status": "idle" if state["pending"] == 0 else "busy", **state}, False
+
+    if op == "catalog":
+        return _catalog(speaker, request.get("backend")), False
 
     if op == "history":
         limit = request.get("limit")

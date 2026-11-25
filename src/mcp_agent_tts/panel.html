@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Chatterbox</title>
+<title>mcp-agent-tts</title>
 <!--
   One file, no external assets, on purpose: the page has to render the same in a
   normal browser and inside an embedded webview (an editor or agent app's browser
@@ -58,6 +58,16 @@
     text-transform: uppercase; color: var(--muted);
   }
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 12px; }
+  label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 12px; }
+  label[hidden] { display: none; }
+  select, input {
+    background: #14161a; color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 9px; font: inherit; min-width: 0; width: 100%;
+  }
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  details[open] summary { margin-bottom: 8px; }
   button {
     background: #262b34; color: var(--text); border: 1px solid var(--line);
     border-radius: 7px; padding: 7px 13px; font: inherit; cursor: pointer;
@@ -130,12 +140,37 @@
 </head>
 <body>
 <header>
-  <h1>Chatterbox</h1>
+  <h1>mcp-agent-tts</h1>
   <span id="pill" class="pill">connecting…</span>
   <button id="worker" class="danger" title="Start or stop the resident worker process">Start worker</button>
   <button id="panel-stop" class="danger" title="Shut down this panel server">Stop panel</button>
   <span id="detail" class="muted"></span>
 </header>
+
+<section>
+  <h2>Voice</h2>
+  <div class="grid">
+    <label>Backend <select id="backend"></select></label>
+    <label>Model <select id="model"></select></label>
+    <label>Voice <select id="voice"></select></label>
+    <label>Language <input id="language" list="languages" placeholder="en" autocomplete="off"></label>
+    <datalist id="languages"></datalist>
+  </div>
+  <details id="advanced">
+    <summary>Advanced knobs</summary>
+    <div class="grid" id="knob-grid">
+      <label>Exaggeration <input id="exaggeration" type="number" step="0.05" min="0" max="2" placeholder="default"></label>
+      <label>CFG weight <input id="cfg_weight" type="number" step="0.05" min="0" max="1" placeholder="default"></label>
+      <label>Temperature <input id="temperature" type="number" step="0.05" min="0.05" max="5" placeholder="default"></label>
+      <label>Top P <input id="top_p" type="number" step="0.01" min="0" max="1" placeholder="default"></label>
+      <label>Top K <input id="top_k" type="number" step="1" min="0" max="1000" placeholder="default"></label>
+      <label>Repetition penalty <input id="repetition_penalty" type="number" step="0.05" min="1" max="2" placeholder="default"></label>
+      <label>Norm loudness <select id="norm_loudness"><option value="">default</option><option value="true">on</option><option value="false">off</option></select></label>
+      <label>Seed <input id="seed" type="number" step="1" min="0" placeholder="default"></label>
+    </div>
+    <p id="knob-note" class="muted"></p>
+  </details>
+</section>
 
 <section>
   <h2>Playback</h2>
@@ -180,6 +215,12 @@ let panelStopping = false;
 let lastUnload = null;
 //: The history payload currently on screen. See renderHistory for why.
 let renderedHistory = null;
+//: The on-demand backend/model/voice inventory from the worker.
+let catalog = null;
+let catalogLoading = false;
+//: One attempt per worker/backend. An older worker rejects `catalog`; retrying
+//: it on every two-second poll would only flash the same error forever.
+let catalogTried = false;
 
 function say(text, bad) {
   const el = $("msg");
@@ -197,6 +238,117 @@ async function api(path, body) {
   if (!payload.ok) {
     throw new Error(payload.message || payload.reason || ("HTTP " + response.status));
   }
+  return payload;
+}
+
+function option(value, label) {
+  const el = document.createElement("option");
+  el.value = value;
+  el.textContent = label;
+  return el;
+}
+
+function fillSelect(select, options, selected) {
+  select.replaceChildren(...options.map((item) => option(item.value, item.label)));
+  select.value = selected || "";
+}
+
+// Fetch the inventory only when asked: putting it in the two-second status poll
+// would re-scan the voices directory and probe audio files forever.
+async function loadCatalog(backend) {
+  if (catalogLoading) return;
+  catalogLoading = true;
+  catalogTried = true;
+  try {
+    const result = await api("/api/catalog", { backend: backend || undefined });
+    catalog = result;
+    fillSelect(
+      $("backend"),
+      result.backends.map((item) => ({ value: item.key, label: item.label })),
+      result.backend
+    );
+    const models = result.models.filter((item) => item.backend === result.backend);
+    const model = models.some((item) => item.key === $("model").value)
+      ? $("model").value
+      : result.defaults.model;
+    fillSelect(
+      $("model"),
+      models.map((item) => ({ value: item.key, label: item.label + " · " + item.params })),
+      model
+    );
+    const voice = result.voices.some((item) => item.name === $("voice").value)
+      ? $("voice").value
+      : result.defaults.voice;
+    fillSelect(
+      $("voice"),
+      result.voices.map((item) => ({
+        value: item.name,
+        label: item.name + (item.fixed ? " (built-in)" : ""),
+      })),
+      voice
+    );
+    $("languages").replaceChildren(
+      ...result.languages.map((item) => option(item.code, item.name))
+    );
+    if (!result.languages.some((item) => item.code === $("language").value)) {
+      $("language").value = result.defaults.language || "";
+    }
+    updateKnobState();
+  } catch (error) {
+    say("catalog unavailable: " + error.message, true);
+  } finally {
+    catalogLoading = false;
+  }
+}
+
+// Only show style knobs the selected model actually honors. An unset field is
+// left out of the request, which keeps the model's own tuned default.
+function updateKnobState() {
+  if (!catalog) return;
+  const model = catalog.models.find(
+    (item) => item.backend === catalog.backend && item.key === $("model").value
+  );
+  const styleKnobs = [
+    "exaggeration", "cfg_weight", "temperature", "top_p", "top_k",
+    "repetition_penalty", "norm_loudness", "seed",
+  ];
+  const honored = model ? styleKnobs.filter((name) => model.tunable.includes(name)) : [];
+  $("knob-grid").hidden = honored.length === 0;
+  if (!model) {
+    $("knob-note").textContent = "";
+  } else if (honored.length) {
+    $("knob-note").textContent =
+      "Unset keeps " + model.label + "'s tuned default. Honored here: " + honored.join(", ") + ".";
+  } else {
+    $("knob-note").textContent =
+      model.label + " ignores style knobs; choose voice and language instead.";
+  }
+}
+
+function speakPayload() {
+  const payload = { text: $("text").value.trim() };
+  for (const field of ["backend", "model", "voice", "language"]) {
+    const value = $(field).value.trim();
+    if (value) payload[field] = value;
+  }
+  const numbers = {
+    exaggeration: "exaggeration",
+    cfg_weight: "cfg_weight",
+    temperature: "temperature",
+    top_p: "top_p",
+    top_k: "top_k",
+    repetition_penalty: "repetition_penalty",
+    seed: "seed",
+  };
+  for (const [id, field] of Object.entries(numbers)) {
+    const raw = $(id).value.trim();
+    if (!raw) continue;
+    const value = Number(raw);
+    if (!Number.isFinite(value)) throw new Error(id + " must be a number");
+    payload[field] = value;
+  }
+  const norm = $("norm_loudness").value;
+  if (norm) payload.norm_loudness = norm === "true";
   return payload;
 }
 
@@ -352,6 +504,9 @@ async function refresh() {
     if (!state.ok) throw new Error(state.message || state.reason || "worker unavailable");
     lastState = state;
     applyState(state);
+    // The first successful poll can follow a worker start; the catalog is
+    // deliberately not part of the poll itself.
+    if (!catalog && !catalogLoading && !catalogTried) loadCatalog($("backend").value);
     $("stop").disabled = false;
     $("replay-last").disabled = !(state.messages && state.messages.length);
   } catch (error) {
@@ -392,6 +547,11 @@ $("replay-last").addEventListener("click", () => {
     (lastState && lastState.messages && lastState.messages[0] && lastState.messages[0].message_id);
   if (id) replay(id);
 });
+$("backend").addEventListener("change", () => {
+  catalogTried = false;
+  loadCatalog($("backend").value);
+});
+$("model").addEventListener("change", updateKnobState);
 $("unload").addEventListener("click", async () => {
   // No confirm: unloading costs nothing but seconds to reload, so the header
   // reports what the worker is doing instead of a dialog interrupting the page
@@ -413,6 +573,7 @@ $("worker").addEventListener("click", () => {
     // Starting imports torch before the worker can answer, so say something
     // now rather than leaving the button silent for several seconds.
     say("starting the worker…");
+    catalogTried = false;
     act("worker started", "/api/worker/start");
     return;
   }
@@ -432,9 +593,13 @@ $("panel-stop").addEventListener("click", async () => {
 $("speak").addEventListener("click", () => {
   const text = $("text").value.trim();
   if (!text) { say("nothing to speak", true); return; }
-  act("speaking", "/api/speak", { text });
-  $("text").value = "";
-  count();
+  try {
+    act("speaking", "/api/speak", speakPayload());
+    $("text").value = "";
+    count();
+  } catch (error) {
+    say(error.message, true);
+  }
 });
 $("text").addEventListener("input", count);
 $("text").addEventListener("keydown", (event) => {

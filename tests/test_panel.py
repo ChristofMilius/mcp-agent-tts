@@ -99,6 +99,14 @@ class TestPage:
         assert "Replay last" in body
         assert "<!doctype html>" in body.lower()
 
+    def test_the_page_has_backend_model_voice_and_language_controls(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "<h1>mcp-agent-tts</h1>" in body
+        for field in ("backend", "model", "voice", "language"):
+            assert 'id="' + field + '"' in body
+        assert 'id="advanced"' in body
+        assert 'id="knob-note"' in body
+
     def test_the_page_says_when_the_model_is_loading(self, panel):
         # A cold start is seconds of silence that used to read as "speaking";
         # the page has to be able to name it.
@@ -214,6 +222,40 @@ class TestActions:
         status, _body = post(panel.base, "/api/speak", {"text": "hello"})
         assert status == 200
         assert panel.calls[-1] == {"op": "speak", "text": "hello", "play_audio": True}
+
+    def test_catalog_is_forwarded_with_the_selected_backend(self, panel):
+        panel.replies["catalog"] = {"ok": True, "backends": [], "models": []}
+        status, body = post(panel.base, "/api/catalog", {"backend": "lfm3"})
+        assert status == 200
+        assert body["ok"] is True
+        assert panel.calls[-1] == {"op": "catalog", "backend": "lfm3"}
+
+    def test_speak_forwards_the_selected_voice_and_knobs(self, panel):
+        status, _body = post(
+            panel.base,
+            "/api/speak",
+            {
+                "text": "hello",
+                "backend": "lfm3",
+                "model": "lfm3",
+                "voice": "female",
+                "language": "fr",
+                "temperature": 0.7,
+                "norm_loudness": False,
+            },
+        )
+        assert status == 200
+        assert panel.calls[-1] == {
+            "op": "speak",
+            "text": "hello",
+            "play_audio": True,
+            "backend": "lfm3",
+            "model": "lfm3",
+            "voice": "female",
+            "language": "fr",
+            "temperature": 0.7,
+            "norm_loudness": False,
+        }
 
     def test_a_worker_refusal_is_relayed(self, panel):
         panel.replies["replay"] = {

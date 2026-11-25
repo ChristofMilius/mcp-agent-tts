@@ -96,6 +96,39 @@ _LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 #: request blocks on it rather than answering "started" before it is true.
 _START_TIMEOUT_S = 30.0
 
+#: Per-call controls the page may forward. Blank fields are omitted so the
+#: worker and the model keep their own tuned defaults.
+_SPEAK_OPTIONAL_FIELDS = (
+    "backend",
+    "model",
+    "voice",
+    "language",
+    "t3_model",
+    "exaggeration",
+    "cfg_weight",
+    "temperature",
+    "top_p",
+    "top_k",
+    "repetition_penalty",
+    "norm_loudness",
+    "seed",
+)
+
+
+def _speak_payload(body: dict[str, Any]) -> dict[str, Any]:
+    """Build a speak op from the page, keeping unset knobs out of the wire."""
+    request: dict[str, Any] = {
+        "op": "speak",
+        "text": body.get("text"),
+        "play_audio": True,
+    }
+    for field in _SPEAK_OPTIONAL_FIELDS:
+        value = body.get(field)
+        if value is None or value == "":
+            continue
+        request[field] = value
+    return request
+
 
 def page_html() -> str:
     """The panel page, read from the package data file next to this module."""
@@ -148,7 +181,9 @@ class PanelHandler(BaseHTTPRequestHandler):
         if body is None:
             return
         if path == "/api/speak":
-            self._forward({"op": "speak", "text": body.get("text"), "play_audio": True})
+            self._forward(_speak_payload(body))
+        elif path == "/api/catalog":
+            self._forward({"op": "catalog", "backend": body.get("backend")})
         elif path == "/api/replay":
             self._forward({"op": "replay", "message_id": body.get("message_id")})
         elif path == "/api/stop":
