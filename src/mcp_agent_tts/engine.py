@@ -129,7 +129,7 @@ class TtsEngine:
         probe = getattr(engine, "is_loaded", None)
         if callable(probe):
             return bool(probe())
-        return bool(getattr(engine, "status", lambda: {}).get("loaded_model"))
+        return bool(getattr(engine, "status", lambda: {})().get("loaded_model"))
 
     @property
     def loading_model(self) -> str | None:

@@ -94,6 +94,16 @@ class TestDispatcher:
         ]
         assert set(status["engines"]) == {BACKEND_CHATTERBOX, BACKEND_LFM3}
 
+    def test_is_loaded_falls_back_to_status_result(self, cfg):
+        engine = TtsEngine(cfg)
+        engine._last_backend = BACKEND_LFM3
+        engine._engines[BACKEND_LFM3] = type(
+            "Fake", (), {"status": lambda self: {"loaded_model": "lfm3"}}
+        )()
+        assert engine.is_loaded() is True
+        engine._engines[BACKEND_LFM3] = type("Fake", (), {"status": lambda self: {}})()
+        assert engine.is_loaded() is False
+
 
 class TestLfm3Engine:
     def test_rejects_reference_clip(self, cfg):
