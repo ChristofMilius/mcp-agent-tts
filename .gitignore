@@ -5,6 +5,8 @@
 !.gitignore
 !/.python-version
 !/.env.example
+!/examples/
+!/examples/**
 !/LICENSE
 !/README.md
 !/pyproject.toml

@@ -52,6 +52,44 @@ Start the resident synthesis worker separately:
 uv run python -m mcp_agent_tts worker
 ```
 
+## Register with agent harnesses
+
+Every example launches the same stdio server:
+
+```text
+uv run --no-sync --directory <checkout> mcp-agent-tts serve
+```
+
+Replace `<checkout>` with the absolute path to this repository. Keep the
+`--no-sync` flag: it stops the harness from resolving packages during every
+tool connection. The worker is a separate long-lived process, so start
+`mcp-agent-tts worker` once on this machine before the first spoken reply.
+
+| Harness | Example | Notes |
+|---|---|---|
+| OpenCode V2 | `examples/opencode.jsonc` | `mcp.servers`, `environment`; use `disabled: true` to keep it registered but disconnected. |
+| LM Studio | `examples/lmstudio.mcp.json` | Follows Cursor's `mcp.json` notation. Add it under Program > Install > Edit `mcp.json`. |
+| LM Studio, LFM3 default | `examples/lmstudio.lfm3.mcp.json` | Adds the LFM3 backend and GGUF/mmproj paths. |
+| Cursor | `examples/cursor.mcp.json` | Uses `${workspaceFolder}` and `envFile`. |
+| Claude Desktop | `examples/claude-desktop.json` | `claude_desktop_config.json`. |
+| Other JSON harnesses | `examples/lmstudio.mcp.json` | The `mcpServers` shape is the common denominator for local stdio servers. |
+| Other YAML harnesses | `examples/generic.mcp.yaml` | Same command, YAML mapping. |
+| LFM3 settings | `examples/lfm3.env` | Copy to `<checkout>/.env`; keep machine-specific paths out of registry files. |
+
+The server key in these examples is `mcp-agent-tts`, so OpenCode names the
+tools `mcp-agent-tts_speak`, `mcp-agent-tts_tts_status`, and so on. Under
+OpenCode's default Code Mode they are reached as
+`tools["mcp-agent-tts"].speak(...)`, `tools["mcp-agent-tts"].tts_status()` and
+the like.
+
+Settings live in `<checkout>/.env`, which the server opens itself. LM Studio
+and some other harnesses have been observed not forwarding their `env` block
+reliably, so treat the `env` entries in these examples as optional overrides,
+not the only place to configure the tool. Copy `.env.example` to `.env` for
+Chatterbox defaults or `examples/lfm3.env` to `.env` for LFM3 defaults. The
+`backend`, `model`, `voice` and `language` arguments on each `speak()` call
+still override those defaults per utterance.
+
 ## Control panel
 
 ```powershell

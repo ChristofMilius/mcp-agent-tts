@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "mcp-agent-tts": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "--directory",
+        "${workspaceFolder}/mcp-agent-tts",
+        "mcp-agent-tts",
+        "serve"
+      ],
+      "envFile": "${workspaceFolder}/mcp-agent-tts/.env"
+    }
+  }
+}

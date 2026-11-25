@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "mcp-agent-tts": {
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "--directory",
+        "<absolute path to mcp-agent-tts checkout>",
+        "mcp-agent-tts",
+        "serve"
+      ],
+      "env": {
+        "MCP_TTS_BACKEND": "chatterbox",
+        "MCP_TTS_MODEL": "nano"
+      }
+    }
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "mcp-agent-tts": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "run",
+        "--no-sync",
+        "--directory",
+        "<absolute path to mcp-agent-tts checkout>",
+        "mcp-agent-tts",
+        "serve"
+      ],
+      "env": {
+        "MCP_TTS_BACKEND": "lfm3",
+        "MCP_TTS_VOICE": "female",
+        "MCP_TTS_LFM3_MODEL": "<absolute path to LFM3 GGUF>",
+        "MCP_TTS_LFM3_MMPROJ": "<absolute path to LFM3 mmproj GGUF>",
+        "MCP_TTS_LFM3_EXECUTABLE": "<absolute path to llama-server>",
+        "MCP_TTS_LFM3_LANGUAGE": "en"
+      }
+    }
+  }
+}

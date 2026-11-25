@@ -1,0 +1,26 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // OpenCode V2: server names live under mcp.servers.
+  // Add "disabled": true to keep the server registered but disconnected.
+  "mcp": {
+    "servers": {
+      "mcp-agent-tts": {
+        "type": "local",
+        "command": [
+          "uv",
+          "run",
+          "--no-sync",
+          "--directory",
+          "<absolute path to mcp-agent-tts checkout>",
+          "mcp-agent-tts",
+          "serve"
+        ],
+        "cwd": "<absolute path to mcp-agent-tts checkout>",
+        "environment": {
+          "MCP_TTS_BACKEND": "chatterbox",
+          "MCP_TTS_MODEL": "nano"
+        }
+      }
+    }
+  }
+}
