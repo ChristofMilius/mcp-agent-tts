@@ -1,0 +1,96 @@
+[project]
+name = "mcp-agent-tts"
+version = "0.1.0"
+description = "General MCP text-to-speech harness with switchable local backends - Chatterbox and LFM3, with voice cloning where the backend supports it."
+readme = "README.md"
+authors = [
+    { name = "Christof Milius" }
+]
+license = "MIT"
+# The ported Chatterbox backend keeps its original validation envelope:
+# chatterbox-tts pins torch==2.6.0 below 3.14 but torch>=2.9.0 on 3.14+, so an
+# open range cannot resolve to one pin. The harness itself needs only numpy.
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "mcp[cli]>=2.0.0",
+    "python-dotenv>=1.0.0",
+    "numpy>=2.1.0",
+]
+
+[project.scripts]
+mcp-agent-tts = "mcp_agent_tts:main"
+
+[project.optional-dependencies]
+# Install with `uv sync --extra chatterbox` to enable the Chatterbox backend.
+# The pins mirror the validated mcp-agent-chatterbox project; the overrides
+# below lift the upstream hard pins to the same tested envelope.
+chatterbox = [
+    "chatterbox-tts",
+    "torch==2.14.0",
+    "torchaudio==2.11.0",
+    "setuptools>=84.1.0",
+]
+dev = [
+    "pytest>=9.0.0",
+    "pytest-cov>=7.0.0",
+    "ruff>=0.10.0",
+]
+# LFM3 needs no Python dependency: the backend talks to a resident
+# `llama-server` started from an installed llama.cpp build.
+
+[tool.uv.sources]
+chatterbox-tts = { git = "https://github.com/resemble-ai/chatterbox.git", rev = "5de7a54aa4e5e2baadb0182dde554908b48b85c2" }
+torch = { index = "pytorch-cu132" }
+
+[tool.uv]
+override-dependencies = [
+    "torch==2.14.0+cu132",
+    "torchaudio==2.11.0",
+    "transformers==5.10.4",
+    "diffusers==0.38.0",
+    "safetensors==0.8.0",
+    "gradio>=6.15.1",
+    "pillow>=13.0.0",
+]
+constraint-dependencies = [
+    "starlette>=1.3.1",
+    "coverage<8.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu132"
+url = "https://download.pytorch.org/whl/cu132"
+explicit = true
+
+[build-system]
+requires = ["uv_build>=0.12.10,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src"]
+extend-exclude = [".venv", "tts_output", "voices", "logs"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+include = ["src", "tests"]
+pythonVersion = "3.13"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-p no:cacheprovider"
+
+[tool.coverage.run]
+source = ["mcp_agent_tts"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+]

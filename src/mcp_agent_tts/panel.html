@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chatterbox</title>
+<!--
+  One file, no external assets, on purpose: the page has to render the same in a
+  normal browser and inside an embedded webview (an editor or agent app's browser
+  pane), and neither a CDN font nor a bundle is worth that risk for five buttons.
+  Every action is a POST to the panel process, which forwards it to the resident
+  worker; nothing here touches audio directly.
+-->
+<style>
+  :root {
+    --bg: #14161a; --panel: #1c1f26; --line: #2b3039; --text: #e6e8ec;
+    --muted: #9aa3b2; --accent: #6ea8fe; --warn: #f0b429; --bad: #f26d6d;
+    --ok: #4ade80;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; padding: 18px; background: var(--bg); color: var(--text);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+    /* A column that fills the window: the history section takes whatever height
+       is left, and the page itself only scrolls when the window is too short to
+       give it its floor. */
+    display: flex; flex-direction: column;
+    height: 100vh; height: 100dvh; overflow: auto;
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .02em; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; flex-wrap: wrap; }
+  .pill {
+    padding: 2px 10px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid var(--line); color: var(--muted);
+    /* A long detail line must not squeeze these two into two rows. */
+    flex: 0 0 auto; white-space: nowrap;
+  }
+  #worker { flex: 0 0 auto; white-space: nowrap; }
+  #detail { flex: 1 1 20ch; min-width: 0; }
+  .pill.busy { color: var(--warn); border-color: var(--warn); }
+  .pill.idle { color: var(--ok); border-color: var(--ok); }
+  .pill.off  { color: var(--bad); border-color: var(--bad); }
+  section {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px; margin-bottom: 14px;
+    /* Everything except the history keeps its natural height; the page scrolls
+       instead of squeezing the controls. */
+    flex: 0 0 auto;
+  }
+  section.grow {
+    display: flex; flex-direction: column; flex: 1 1 auto;
+    /* The floor that keeps the list usable in a short window. */
+    min-height: 170px;
+  }
+  section h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 700; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--muted);
+  }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button {
+    background: #262b34; color: var(--text); border: 1px solid var(--line);
+    border-radius: 7px; padding: 7px 13px; font: inherit; cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: #24405f; border-color: #35618f; }
+  button.danger:hover:not(:disabled) { border-color: var(--bad); }
+  textarea {
+    width: 100%; min-height: 74px; resize: vertical; background: #14161a;
+    color: var(--text); border: 1px solid var(--line); border-radius: 7px;
+    padding: 9px; font: inherit;
+  }
+  .muted { color: var(--muted); font-size: 12px; }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li {
+    display: flex; align-items: center; gap: 10px; padding: 7px 0;
+    border-top: 1px solid var(--line); font-family: ui-monospace, Consolas, monospace;
+    font-size: 12.5px;
+  }
+  li:first-child { border-top: none; }
+  li .id { flex: 0 0 auto; }
+  li .meta { color: var(--muted); white-space: nowrap; flex: 0 0 auto; }
+  li button { padding: 3px 9px; font-size: 12px; }
+  /* The transcript field. It is the space between the play button and the file
+     data, showing what the file says so a replay candidate can be recognised
+     without opening anything. Idle it is one clipped line; hovering the row
+     scrolls it like a news ticker (see .scroll below). Prose font, because this
+     is language, not a filename. */
+  li .say {
+    flex: 1 1 0; min-width: 0; overflow: hidden; white-space: nowrap;
+    font-family: "Segoe UI", system-ui, sans-serif; color: var(--text);
+  }
+  li .say > span {
+    display: inline-block; max-width: 100%; overflow: hidden;
+    text-overflow: ellipsis; vertical-align: bottom;
+  }
+  /* Files written before the tags existed have no text to show; say so rather
+     than leaving the field looking broken. */
+  li .say.none::before { content: "no transcript recorded"; color: #5c6673; font-style: italic; }
+  /* --shift and --dur are set from the measured overflow on mouseenter. 60 px/s
+     is a ticker pace: about 11 characters a second, slow enough to follow a
+     sentence or two but quick enough to see a long message move. Removing
+     .scroll resets the transform at once. */
+  li .say.scroll > span { max-width: none; animation: marquee var(--dur, 20s) linear infinite; }
+  @keyframes marquee {
+    from { transform: translateX(0); }
+    to { transform: translateX(var(--shift, 0px)); }
+  }
+  /* Motion-sensitive users get the whole text wrapped in place instead. */
+  @media (prefers-reduced-motion: reduce) {
+    li .say.scroll { white-space: normal; }
+    li .say.scroll > span { animation: none; }
+  }
+  /* The list is the scroll region, not the page: it grows with the window down
+     to the section's floor, and an open tab keeps its scroll position and its
+     hovered ticker across the two-second poll because an unchanged history is
+     not re-rendered at all. */
+  #history {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+    scrollbar-width: thin; scrollbar-color: #3a414d transparent;
+  }
+  #history::-webkit-scrollbar { width: 10px; }
+  #history::-webkit-scrollbar-thumb {
+    background: #3a414d; border-radius: 999px; border: 2px solid var(--panel);
+  }
+  #msg { min-height: 18px; font-size: 12.5px; color: var(--muted); flex: 0 0 auto; }
+  #msg.bad { color: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Chatterbox</h1>
+  <span id="pill" class="pill">connecting…</span>
+  <button id="worker" class="danger" title="Start or stop the resident worker process">Start worker</button>
+  <button id="panel-stop" class="danger" title="Shut down this panel server">Stop panel</button>
+  <span id="detail" class="muted"></span>
+</header>
+
+<section>
+  <h2>Playback</h2>
+  <div class="row">
+    <button id="stop" class="danger">Stop playback</button>
+    <button id="replay-last">Replay last</button>
+    <button id="unload" class="danger">Unload model</button>
+    <span id="queue" class="muted"></span>
+  </div>
+</section>
+
+<section>
+  <h2>Speak something</h2>
+  <textarea id="text" placeholder="Type text and press Speak. Ctrl+Enter also speaks."></textarea>
+  <div class="row" style="margin-top:9px">
+    <button id="speak" class="primary">Speak</button>
+    <span id="count" class="muted"></span>
+  </div>
+</section>
+
+<section class="grow">
+  <h2>History <span id="outdir" class="muted"></span></h2>
+  <ul id="history"><li class="muted">nothing rendered yet</li></ul>
+</section>
+
+<div id="msg"></div>
+
+<script>
+"use strict";
+
+const ACTION_HEADER = "X-Chatterbox";
+const $ = (id) => document.getElementById(id);
+let lastState = null;
+//: True while an unload request is in flight, so the header can say so before
+//: the next poll reports the result.
+let unloading = false;
+//: True while the panel is shutting itself down, so the two-second poll stops
+//: hammering a dead server and the page can say so instead.
+let panelStopping = false;
+//: {freed_mb} of the last successful unload, kept while the model stays out so
+//: the header can name the price that was paid.
+let lastUnload = null;
+//: The history payload currently on screen. See renderHistory for why.
+let renderedHistory = null;
+
+function say(text, bad) {
+  const el = $("msg");
+  el.textContent = text || "";
+  el.className = bad ? "bad" : "";
+}
+
+async function api(path, body) {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", [ACTION_HEADER]: "1" },
+    body: JSON.stringify(body || {}),
+  });
+  const payload = await response.json().catch(() => ({ ok: false, reason: "bad_response" }));
+  if (!payload.ok) {
+    throw new Error(payload.message || payload.reason || ("HTTP " + response.status));
+  }
+  return payload;
+}
+
+function age(seconds) {
+  if (!seconds) return "unknown age";
+  const delta = Math.max(0, Date.now() / 1000 - seconds);
+  if (delta < 60) return Math.round(delta) + "s ago";
+  if (delta < 3600) return Math.round(delta / 60) + "m ago";
+  if (delta < 86400) return Math.round(delta / 3600) + "h ago";
+  return Math.round(delta / 86400) + "d ago";
+}
+
+function size(bytes) {
+  if (!bytes) return "0 B";
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(0) + " kB";
+  return (bytes / 1048576).toFixed(1) + " MB";
+}
+
+function renderHistory(messages) {
+  const list = $("history");
+  // A poll that changes nothing must leave the rows alone: replacing them
+  // destroys the node under the cursor, which kills a marquee mid-scroll every
+  // two seconds. Comparing the payload is enough to tell "nothing new" from
+  // "new message, finished utterance, or a replay".
+  const fingerprint = JSON.stringify(messages);
+  if (fingerprint === renderedHistory) return;
+  renderedHistory = fingerprint;
+  list.replaceChildren();
+  if (!messages.length) {
+    const empty = document.createElement("li");
+    empty.className = "muted";
+    empty.textContent = "nothing rendered yet";
+    list.append(empty);
+    return;
+  }
+  for (const message of messages) {
+    const item = document.createElement("li");
+
+    const button = document.createElement("button");
+    button.textContent = "▶";
+    button.title = "Replay " + message.message_id;
+    button.addEventListener("click", () => replay(message.message_id));
+
+    // The transcript of the message, reconstructed from its chunks' ICMT tags.
+    // The extra span exists because the marquee translates it while the field
+    // itself stays clipped.
+    const say = document.createElement("span");
+    say.className = "say";
+    if (message.transcript) {
+      const text = document.createElement("span");
+      text.textContent = message.transcript;
+      say.append(text);
+    } else {
+      say.classList.add("none");
+    }
+
+    const id = document.createElement("span");
+    id.className = "id";
+    id.textContent = message.message_id;
+
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent =
+      message.chunks + "× · " + size(message.bytes) + " · " + age(message.modified);
+
+    item.append(button, say, id, meta);
+    item.addEventListener("mouseenter", () => scrollText(item, true));
+    item.addEventListener("mouseleave", () => scrollText(item, false));
+    list.append(item);
+  }
+}
+
+// Start or stop the ticker on one row. The distance is measured at hover time,
+// because it depends on the window width and the current row contents.
+function scrollText(item, on) {
+  const say = item.querySelector(".say");
+  const text = say && say.firstElementChild;
+  if (!text) return;
+  if (!on) {
+    say.classList.remove("scroll");
+    return;
+  }
+  const shift = text.scrollWidth - say.clientWidth;
+  if (shift <= 1) return;  // it already fits; nothing to scroll
+  say.style.setProperty("--shift", -shift + "px");
+  say.style.setProperty("--dur", Math.max(4, shift / 60) + "s");
+  say.classList.add("scroll");
+}
+
+function applyState(state) {
+  const worker = state.worker || {};
+  const pill = $("pill");
+  const model = worker.model || {};
+  const loading = model.loading || null;
+  const pending = worker.pending || 0;
+  const busy = pending > 0;
+  // Loading outranks speaking: a cold start is a queued job that makes no
+  // sound, so calling it "speaking" hides the wait this line exists to show.
+  if (unloading) {
+    pill.textContent = "unloading model…";
+    pill.className = "pill busy";
+  } else if (loading) {
+    pill.textContent = "loading model…";
+    pill.className = "pill busy";
+  } else {
+    pill.textContent = busy ? "speaking" : "idle";
+    pill.className = "pill " + (busy ? "busy" : "idle");
+  }
+  $("worker").textContent = "Stop worker";
+  $("worker").dataset.running = "1";
+  $("queue").textContent = busy
+    ? pending + " job" + (pending === 1 ? "" : "s") + " queued" +
+      (worker.active ? " · now: " + worker.active : "")
+    : "";
+  const notes = [];
+  if (unloading) {
+    notes.push("unloading model…");
+  } else if (loading) {
+    // No duration promised: a cold start measured 44 s here (torch import plus
+    // weights), and a warm reload of an unloaded model is far quicker.
+    notes.push(
+      "loading " + loading + " · the first utterance after a start or unload must read the weights"
+    );
+  } else if (model.loaded === false) {
+    // Only shown while the weights are out, so it cannot go stale on its own:
+    // a reload hides it, and the next unload overwrites it. Clearing it here
+    // would race the poll the unload handler fires before its request, which
+    // can still answer "loaded" from before the unload and wipe the record.
+    const freed = lastUnload && lastUnload.freed_mb
+      ? " · last unload freed " + lastUnload.freed_mb + " MB"
+      : "";
+    notes.push("model not loaded" + freed + " · the next utterance loads it first");
+  }
+  const last = worker.last;
+  if (last) {
+    notes.push(
+      "last: " + last.chunks + " chunk" + (last.chunks === 1 ? "" : "s") +
+        (last.duration_s ? " · " + last.duration_s + "s audio" : "") +
+        (last.max_gap_s ? " · worst gap " + last.max_gap_s + "s" : "")
+    );
+  }
+  $("detail").textContent = notes.join(" · ");
+  $("outdir").textContent = state.output_dir || "";
+  renderHistory(state.messages || []);
+}
+
+async function refresh() {
+  if (panelStopping) return;
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    const state = await response.json();
+    if (!state.ok) throw new Error(state.message || state.reason || "worker unavailable");
+    lastState = state;
+    applyState(state);
+    $("stop").disabled = false;
+    $("replay-last").disabled = !(state.messages && state.messages.length);
+  } catch (error) {
+    lastState = null;
+    $("pill").textContent = "worker offline";
+    $("pill").className = "pill off";
+    $("worker").textContent = "Start worker";
+    delete $("worker").dataset.running;
+    $("detail").textContent = "";
+    $("queue").textContent = "";
+    $("stop").disabled = true;
+    $("replay-last").disabled = true;
+    say(error.message, true);
+  }
+}
+
+function replay(id) {
+  say("");
+  api("/api/replay", { message_id: id })
+    .then(() => { say("replaying " + id); refresh(); })
+    .catch((error) => say(error.message, true));
+}
+
+async function act(label, path, body) {
+  try {
+    await api(path, body);
+    say(label);
+  } catch (error) {
+    say(error.message, true);
+  }
+  refresh();
+}
+
+$("stop").addEventListener("click", () => act("stopped", "/api/stop"));
+$("replay-last").addEventListener("click", () => {
+  const last = lastState && lastState.worker && lastState.worker.last;
+  const id = (last && last.message_id) ||
+    (lastState && lastState.messages && lastState.messages[0] && lastState.messages[0].message_id);
+  if (id) replay(id);
+});
+$("unload").addEventListener("click", async () => {
+  // No confirm: unloading costs nothing but seconds to reload, so the header
+  // reports what the worker is doing instead of a dialog interrupting the page
+  // that describes it.
+  unloading = true;
+  refresh();  // paint "unloading model…" before the request resolves
+  try {
+    const result = await api("/api/unload", {});
+    lastUnload = { model: result.unloaded, freed_mb: result.freed_mb || 0 };
+    say(result.was_loaded === false ? "nothing was loaded" : "");
+  } catch (error) {
+    say(error.message, true);
+  }
+  unloading = false;
+  refresh();
+});
+$("worker").addEventListener("click", () => {
+  if ($("worker").dataset.running !== "1") {
+    // Starting imports torch before the worker can answer, so say something
+    // now rather than leaving the button silent for several seconds.
+    say("starting the worker…");
+    act("worker started", "/api/worker/start");
+    return;
+  }
+  // No confirm on purpose: a toggle should toggle. The worker drains its queue
+  // before exiting, so this cannot truncate speech, and the same button starts
+  // it again.
+  say("stopping the worker…");
+  act("worker stopped", "/api/worker/stop");
+});
+$("panel-stop").addEventListener("click", async () => {
+  panelStopping = true;
+  say("stopping panel…");
+  try { await api("/api/panel/stop", {}); } catch (error) { /* server is gone */ }
+  document.body.innerHTML =
+    '<div style="padding:40px;text-align:center;color:var(--muted)">Panel stopped. Close this tab.</div>';
+});
+$("speak").addEventListener("click", () => {
+  const text = $("text").value.trim();
+  if (!text) { say("nothing to speak", true); return; }
+  act("speaking", "/api/speak", { text });
+  $("text").value = "";
+  count();
+});
+$("text").addEventListener("input", count);
+$("text").addEventListener("keydown", (event) => {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) $("speak").click();
+});
+function count() {
+  const n = $("text").value.length;
+  $("count").textContent = n ? n + " characters" : "";
+}
+
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 2000);
+</script>
+</body>
+</html>

@@ -1,0 +1,366 @@
+"""
+The panel's HTTP surface.
+=========================
+The panel is a thin relay: every action becomes one op for the resident worker,
+and the page itself holds no state. These tests drive the real server over a
+real loopback socket with `send_request` patched, so what is exercised is the
+routing, the guard and the relay — not a mock of the handler.
+
+Two properties matter beyond "the button works": the page must carry no external
+assets (it has to render inside an embedded browser pane with no network), and
+an action must be impossible to trigger from a foreign web page, which is what
+the header and Origin checks are for.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import threading
+import urllib.error
+import urllib.request
+from types import SimpleNamespace
+
+import pytest
+
+from mcp_agent_tts.panel import PanelServer
+from mcp_agent_tts.worker import WorkerUnavailable
+
+_HEADERS = {"X-Chatterbox": "1", "Content-Type": "application/json"}
+
+
+@pytest.fixture
+def panel(monkeypatch):
+    """A running panel with the worker call recorded instead of sent."""
+    calls: list[dict] = []
+    replies: dict[str, object] = {}
+
+    def fake_send(request, port=None, **kwargs):
+        calls.append(request)
+        reply = replies.get(request["op"])
+        if isinstance(reply, Exception):
+            raise reply
+        if reply is not None:
+            return reply
+        return {
+            "ok": True,
+            "status": "idle",
+            "pending": 0,
+            "active": None,
+            "last": None,
+            "messages": [],
+            "output_dir": "output",
+        }
+
+    monkeypatch.setattr("mcp_agent_tts.panel.send_request", fake_send)
+    server = PanelServer(("127.0.0.1", 0), worker_port=8765)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield SimpleNamespace(
+            base=f"http://127.0.0.1:{server.server_address[1]}",
+            calls=calls,
+            replies=replies,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+
+
+def get(base: str, path: str) -> tuple[int, str]:
+    try:
+        with urllib.request.urlopen(base + path, timeout=5) as response:
+            return response.status, response.read().decode("utf-8")
+    except urllib.error.HTTPError as err:
+        return err.code, err.read().decode("utf-8")
+
+
+def post(
+    base: str, path: str, body: dict | None = None, headers: dict | None = None
+) -> tuple[int, dict]:
+    data = json.dumps(body if body is not None else {}).encode("utf-8")
+    request = urllib.request.Request(
+        base + path, data=data, method="POST", headers={**_HEADERS, **(headers or {})}
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return response.status, json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as err:
+        return err.code, json.loads(err.read().decode("utf-8"))
+
+
+class TestPage:
+    def test_index_is_served(self, panel):
+        status, body = get(panel.base, "/")
+        assert status == 200
+        assert "Replay last" in body
+        assert "<!doctype html>" in body.lower()
+
+    def test_the_page_says_when_the_model_is_loading(self, panel):
+        # A cold start is seconds of silence that used to read as "speaking";
+        # the page has to be able to name it.
+        _status, body = get(panel.base, "/")
+        assert "loading model…" in body
+
+    def test_no_action_opens_a_modal(self, panel):
+        # Every action here is cheap and reversible, so the page reports state
+        # in the header instead of interrupting itself with a dialog.
+        _status, body = get(panel.base, "/")
+        assert "confirm(" not in body
+
+    def test_the_panel_can_stop_itself(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "Stop panel" in body
+        assert "/api/panel/stop" in body
+
+    def test_the_history_list_scrolls_inside_the_window(self, panel):
+        # Every message ever spoken is listed, so the list has to be the scroll
+        # region. A page that grows with each message pushes the controls out of
+        # reach and makes the newest entries the hardest to get to.
+        _status, body = get(panel.base, "/")
+        assert "height: 100dvh" in body
+        assert 'class="grow"' in body
+        rule = re.search(r"#history\s*\{(?P<decls>[^}]*)\}", body)
+        assert rule, "no #history rule"
+        assert "overflow-y: auto" in rule.group("decls")
+
+
+class TestHistoryTranscript:
+    """
+    The transcript field: what a history row says, between the play button and
+    the file data.
+
+    The page is one file with no build step, so these assertions are on the
+    served HTML itself. They pin the three properties that make the field work
+    and none of which would survive being "simplified" away: the field sits
+    between the button and the meta data, the ticker is driven by a measured
+    overflow rather than a fixed distance, and a poll that changes nothing must
+    not replace the rows — a re-created node loses the marquee mid-scroll.
+    """
+
+    def test_the_field_sits_between_the_play_button_and_the_file_data(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "message.transcript" in body
+        assert "item.append(button, say, id, meta)" in body
+
+    def test_the_field_is_clipped_to_one_line_until_hovered(self, panel):
+        _status, body = get(panel.base, "/")
+        rule = re.search(r"li \.say\s*\{(?P<decls>[^}]*)\}", body)
+        assert rule, "no li .say rule"
+        assert "flex: 1 1 0" in rule.group("decls")
+        assert "overflow: hidden" in rule.group("decls")
+        assert "white-space: nowrap" in rule.group("decls")
+
+    def test_hovering_starts_a_slow_ticker(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "@keyframes marquee" in body
+        assert "mouseenter" in body
+        assert "mouseleave" in body
+        # The distance comes from the row's real overflow, not a guess.
+        assert "text.scrollWidth - say.clientWidth" in body
+        # ...and the speed is a constant, so a long text scrolls longer rather
+        # than faster.
+        assert "shift / 60" in body
+
+    def test_a_poll_does_not_rebuild_unchanged_rows(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "if (fingerprint === renderedHistory) return;" in body
+
+    def test_motion_sensitive_viewers_get_the_text_wrapped_instead(self, panel):
+        _status, body = get(panel.base, "/")
+        assert "prefers-reduced-motion" in body
+        assert "li .say.scroll { white-space: normal; }" in body
+
+
+class TestState:
+    def test_state_combines_queue_and_history(self, panel):
+        panel.replies["history"] = {
+            "ok": True,
+            "messages": [{"message_id": "abc", "chunks": 2, "bytes": 8, "modified": 1}],
+            "output_dir": "output",
+        }
+        status, raw = get(panel.base, "/api/state")
+        assert status == 200
+        body = json.loads(raw)
+        assert body["ok"] is True
+        assert body["messages"][0]["message_id"] == "abc"
+        assert body["worker"]["status"] == "idle"
+
+    def test_a_missing_worker_is_reported_as_such(self, panel):
+        panel.replies["status"] = WorkerUnavailable("no worker listening")
+        status, raw = get(panel.base, "/api/state")
+        assert status == 503
+        assert json.loads(raw)["reason"] == "worker_not_running"
+
+
+class TestActions:
+    def test_replay_is_forwarded(self, panel):
+        status, body = post(panel.base, "/api/replay", {"message_id": "abc"})
+        assert status == 200
+        assert body["ok"] is True
+        assert panel.calls[-1] == {"op": "replay", "message_id": "abc"}
+
+    def test_stop_is_forwarded(self, panel):
+        status, _body = post(panel.base, "/api/stop")
+        assert status == 200
+        assert panel.calls[-1] == {"op": "stop"}
+
+    def test_speak_is_forwarded_and_always_plays(self, panel):
+        # The panel is not a "write the files only" tool: a silent button in a
+        # control panel that exists to make sound would be a bug.
+        status, _body = post(panel.base, "/api/speak", {"text": "hello"})
+        assert status == 200
+        assert panel.calls[-1] == {"op": "speak", "text": "hello", "play_audio": True}
+
+    def test_a_worker_refusal_is_relayed(self, panel):
+        panel.replies["replay"] = {
+            "ok": False,
+            "reason": "message_not_found",
+            "message": "nothing on disk",
+        }
+        status, body = post(panel.base, "/api/replay", {"message_id": "gone"})
+        assert status == 409
+        assert body["reason"] == "message_not_found"
+
+    def test_a_missing_worker_is_a_503(self, panel):
+        panel.replies["stop"] = WorkerUnavailable("down")
+        status, body = post(panel.base, "/api/stop")
+        assert status == 503
+        assert body["reason"] == "worker_not_running"
+
+
+class TestGuard:
+    def test_an_action_without_the_header_is_refused(self, panel):
+        status, body = post(panel.base, "/api/unload", headers={"X-Chatterbox": ""})
+        assert status == 403
+        assert body["reason"] == "missing_action_header"
+        assert panel.calls == []
+
+    def test_a_foreign_origin_is_refused(self, panel):
+        status, body = post(panel.base, "/api/unload", headers={"Origin": "https://example.com"})
+        assert status == 403
+        assert body["reason"] == "foreign_origin"
+        assert panel.calls == []
+
+    def test_a_loopback_origin_is_allowed(self, panel):
+        status, _body = post(panel.base, "/api/stop", headers={"Origin": "http://127.0.0.1:8766"})
+        assert status == 200
+
+    def test_a_foreign_origin_still_reads_the_page(self, panel):
+        # The guard is on actions. Reading status reveals nothing that is not
+        # already on disk, and blocking it would break the page in a webview
+        # that sends an Origin the panel does not recognise.
+        status, _body = get(panel.base, "/")
+        assert status == 200
+
+
+class TestWorkerLifecycle:
+    """
+    Starting and stopping the worker process itself.
+
+    These are the only routes that are not a plain relay, so they need their own
+    contract: "Stop worker" must ask the worker to exit rather than cut off the
+    audio, and a start must not leave a second process fighting for the port.
+    """
+
+    def test_stop_worker_sends_shutdown_rather_than_stop(self, panel):
+        status, _body = post(panel.base, "/api/worker/stop")
+        assert status == 200
+        assert panel.calls[-1] == {"op": "shutdown"}
+
+    def test_stopping_a_missing_worker_is_a_503(self, panel):
+        panel.replies["shutdown"] = WorkerUnavailable("down")
+        status, body = post(panel.base, "/api/worker/stop")
+        assert status == 503
+        assert body["reason"] == "worker_not_running"
+
+    def test_starting_an_already_running_worker_spawns_nothing(self, panel, monkeypatch):
+        spawned: list[int] = []
+        monkeypatch.setattr(
+            "mcp_agent_tts.panel.spawn", lambda **kwargs: spawned.append(kwargs["port"])
+        )
+        status, body = post(panel.base, "/api/worker/start")
+        assert status == 200
+        assert body["status"] == "already_running"
+        assert spawned == []
+
+    def test_starting_a_missing_worker_spawns_and_waits_for_it(self, panel, monkeypatch):
+        panel.replies["status"] = WorkerUnavailable("no worker listening")
+        spawned: list[int] = []
+        monkeypatch.setattr(
+            "mcp_agent_tts.panel.spawn", lambda **kwargs: spawned.append(kwargs["port"])
+        )
+        monkeypatch.setattr(
+            "mcp_agent_tts.panel.wait_until_ready", lambda port, timeout=0: True
+        )
+        status, body = post(panel.base, "/api/worker/start")
+        assert status == 200
+        assert body["status"] == "started"
+        assert spawned == [8765]
+
+    def test_a_worker_that_never_answers_is_not_reported_as_started(self, panel, monkeypatch):
+        # Answering "started" while the worker is still importing torch would
+        # make the toggle show "Stop worker" for a process that cannot speak.
+        panel.replies["status"] = WorkerUnavailable("no worker listening")
+        monkeypatch.setattr("mcp_agent_tts.panel.spawn", lambda **kwargs: None)
+        monkeypatch.setattr(
+            "mcp_agent_tts.panel.wait_until_ready", lambda port, timeout=0: False
+        )
+        status, body = post(panel.base, "/api/worker/start")
+        assert status == 503
+        assert body["reason"] == "worker_start_timeout"
+
+
+class TestQuietPolling:
+    """
+    The console must survive a tab being left open.
+
+    The page polls /api/state every two seconds for as long as it is visible, and
+    the console handler runs at INFO, so logging polls there is one line per poll
+    — enough to bury every other message. The polls stay in the rotating file at
+    DEBUG; everything a human might want to see live stays at INFO.
+    """
+
+    def test_a_poll_does_not_reach_the_console_level(self, panel, caplog):
+        caplog.set_level(logging.DEBUG, logger="mcp_agent_tts.panel")
+        get(panel.base, "/api/state")
+        polls = [r for r in caplog.records if "/api/state" in r.getMessage()]
+        assert polls
+        assert all(r.levelno < logging.INFO for r in polls)
+
+    def test_a_page_load_is_still_reported_at_info(self, panel, caplog):
+        caplog.set_level(logging.DEBUG, logger="mcp_agent_tts.panel")
+        get(panel.base, "/")
+        loads = [r for r in caplog.records if '"GET / HTTP/1.1"' in r.getMessage()]
+        assert loads
+        assert all(r.levelno == logging.INFO for r in loads)
+
+    def test_an_action_is_still_reported_at_info(self, panel, caplog):
+        caplog.set_level(logging.DEBUG, logger="mcp_agent_tts.panel")
+        post(panel.base, "/api/stop")
+        actions = [r for r in caplog.records if '"POST /api/stop' in r.getMessage()]
+        assert actions
+        assert all(r.levelno == logging.INFO for r in actions)
+
+
+class TestRouting:
+    def test_unknown_get_is_404(self, panel):
+        status, _body = get(panel.base, "/nope")
+        assert status == 404
+
+    def test_unknown_post_is_404(self, panel):
+        status, body = post(panel.base, "/api/nope")
+        assert status == 404
+        assert body["reason"] == "not_found"
+
+    def test_malformed_json_is_400(self, panel):
+        request = urllib.request.Request(
+            panel.base + "/api/stop", data=b"{not json", method="POST", headers=_HEADERS
+        )
+        with pytest.raises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(request, timeout=5)
+        assert caught.value.code == 400
+        assert json.loads(caught.value.read().decode("utf-8"))["reason"] == "bad_request"

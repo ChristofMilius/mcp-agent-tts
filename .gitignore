@@ -1,0 +1,42 @@
+# Ignore everything by default
+*
+
+# Whitelist: un-ignore exactly what is versioned
+!.gitignore
+!/.python-version
+!/.env.example
+!/LICENSE
+!/README.md
+!/pyproject.toml
+!/uv.lock
+!/src/
+!/src/**
+!/tests/
+!/tests/**
+
+# Never commit real output, model weights or reference voices.
+/tts_output/
+/voices/
+/logs/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.pt
+*.safetensors
+*.gguf
+
+# Local settings, never versioned. Ship .env.example instead.
+/.env
+
+# Re-ignore generated artifacts. These come AFTER the source/test un-ignores:
+# a !dir/** pattern re-includes everything beneath it, and gitignore resolves
+# ties by last match.
+/src/**/__pycache__/
+/tests/**/__pycache__/
+/src/**/*.py[cod]
+/tests/**/*.py[cod]
+/.ruff_cache/
+/.pytest_cache/
+/.venv/
