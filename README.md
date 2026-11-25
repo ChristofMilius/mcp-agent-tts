@@ -37,6 +37,13 @@ That installs the base harness only. Add the Chatterbox engine when needed:
 uv sync --extra chatterbox
 ```
 
+`dev` is a separate optional extra, so adding Chatterbox alone removes the
+test and lint tools. For development, install both:
+
+```powershell
+uv sync --extra chatterbox --extra dev
+```
+
 LFM3 needs an installed `llama.cpp` build whose `llama-server` understands
 LFM3-Omni GGUF plus its mmproj file. No Python package is installed for it.
 
@@ -75,6 +82,10 @@ tool connection. The worker is a separate long-lived process, so start
 | Other JSON harnesses | `examples/lmstudio.mcp.json` | The `mcpServers` shape is the common denominator for local stdio servers. |
 | Other YAML harnesses | `examples/generic.mcp.yaml` | Same command, YAML mapping. |
 | LFM3 settings | `examples/lfm3.env` | Copy to `<checkout>/.env`; keep machine-specific paths out of registry files. |
+
+The two LM Studio rows are alternative presets for the same server name, not
+two servers to register together. If `<checkout>/.env` already holds the LFM3
+paths, omit `env` entirely and pick the backend per call with `backend=`.
 
 The server key in these examples is `mcp-agent-tts`, so OpenCode names the
 tools `mcp-agent-tts_speak`, `mcp-agent-tts_tts_status`, and so on. Under
